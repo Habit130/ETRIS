@@ -61,8 +61,7 @@ If you want to visualize the results, simply modify the `visualize` to `True` in
 
 ## Weights
 
-The weights of our model have been made available at the following link: [https://pan.baidu.com/s/1jaOJKdIg1t8wnWrxgCkkRA?pwd=vmyv](https://pan.baidu.com/s/1jaOJKdIg1t8wnWrxgCkkRA?pwd=vmyv)
-Please note that you may need to enter the password "vmyv" to access the files.
+Our model weights have already been open-sourced and can be directly downloaded from [Huggingface](https://huggingface.co/kkakkkka/ETRIS/tree/main).
 
 ## Acknowledgements
 
