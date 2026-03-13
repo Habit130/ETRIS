@@ -14,7 +14,6 @@ def build_segmenter(args):
             head.append(v)
         else:
             fix.append(v)
-    logger.info('Backbone with decay={}, Head={}'.format(len(backbone), len(head)))
     param_list = [{
         'params': backbone,
         'initial_lr': args.lr_multi * args.base_lr
@@ -24,9 +23,11 @@ def build_segmenter(args):
     }]
     
     n_backbone_parameters = sum(p.numel() for p in backbone)
-    logger.info(f'number of updated params (Backbone): {n_backbone_parameters}.')
     n_head_parameters = sum(p.numel() for p in head)
-    logger.info(f'number of updated params (Head)    : {n_head_parameters}')
     n_fixed_parameters = sum(p.numel() for p in fix)
-    logger.info(f'number of fixed params             : {n_fixed_parameters}')
+    if not getattr(args, 'quiet', False):
+        logger.info('Backbone with decay={}, Head={}'.format(len(backbone), len(head)))
+        logger.info(f'number of updated params (Backbone): {n_backbone_parameters}.')
+        logger.info(f'number of updated params (Head)    : {n_head_parameters}')
+        logger.info(f'number of fixed params             : {n_fixed_parameters}')
     return model, param_list

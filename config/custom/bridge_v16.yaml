@@ -1,0 +1,55 @@
+DATA:
+  dataset: custom
+  dataset_root: ../dataset
+  train_json: train.json
+  test_json: test.json
+  caption_index: 2
+  mask_foreground_threshold: 0
+TRAIN:
+  # Base Arch
+  clip_pretrain: pretrain/ViT-B-16.pt
+  input_size: 416
+  word_len: 17
+  word_dim: 512
+  ladder_dim: 64
+  nhead: 8
+  multi_stage: 3
+  stride: [1, 1, 1]
+  vis_dim: 512
+  fpn_in: [768, 768, 512]
+  fpn_out: [256, 512, 1024]
+  sync_bn: True
+  # Decoder
+  num_layers: 3
+  num_head: 8
+  dim_ffn: 512
+  dropout: 0.1
+  intermediate: False
+  # Training Setting
+  workers: 32
+  epochs: 50
+  milestones: [35]
+  start_epoch: 0
+  batch_size: 32
+  base_lr: 0.0001
+  lr_decay: 0.1
+  lr_multi: 1
+  weight_decay: 0.
+  max_norm: 0.
+  manual_seed: 0
+  print_freq: 100
+  # Resume & Save
+  exp_name: B_V16
+  output_folder: exp/custom
+  save_freq: 1
+  weight:
+  resume:
+Distributed:
+  dist_url: tcp://localhost:3681
+  dist_backend: 'nccl'
+  multiprocessing_distributed: True
+  world_size: 1
+  rank: 0
+TEST:
+  pred_threshold: 0.35
+  visualize: False

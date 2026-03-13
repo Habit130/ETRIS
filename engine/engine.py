@@ -1,17 +1,16 @@
 import os
 import time
-from tqdm import tqdm
+
 import cv2
 import numpy as np
 import torch
 import torch.cuda.amp as amp
 import torch.distributed as dist
 import torch.nn.functional as F
+from tqdm import tqdm
 import wandb
 from loguru import logger
-from utils.dataset import tokenize
-from utils.misc import (AverageMeter, ProgressMeter, concat_all_gather,
-                        trainMetricGPU)
+from utils.misc import AverageMeter, ProgressMeter, trainMetricGPU
 
 
 def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
@@ -81,128 +80,79 @@ def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
 
 
 @torch.no_grad()
-def validate(val_loader, model, epoch, args):
-    iou_list = []
-    model.eval()
-    time.sleep(2)
-    for imgs, texts, param in val_loader:
-        # data
-        imgs = imgs.cuda(non_blocking=True)
-        texts = texts.cuda(non_blocking=True)
-        # inference
-        preds = model(imgs, texts)
-        preds = torch.sigmoid(preds)
-        if preds.shape[-2:] != imgs.shape[-2:]:
-            preds = F.interpolate(preds,
-                                  size=imgs.shape[-2:],
-                                  mode='bicubic',
-                                  align_corners=True).squeeze(1)
-        # process one batch
-        for pred, mask_dir, mat, ori_size in zip(preds, param['mask_dir'],
-                                                 param['inverse'],
-                                                 param['ori_size']):
-            h, w = np.array(ori_size)
-            mat = np.array(mat)
-            pred = pred.cpu().numpy()
-            pred = cv2.warpAffine(pred, mat, (w, h),
-                                  flags=cv2.INTER_CUBIC,
-                                  borderValue=0.)
-            pred = np.array(pred > 0.35)
-            mask = cv2.imread(mask_dir, flags=cv2.IMREAD_GRAYSCALE)
-            mask = mask / 255.
-            # iou
-            inter = np.logical_and(pred, mask)
-            union = np.logical_or(pred, mask)
-            iou = np.sum(inter) / (np.sum(union) + 1e-6)
-            iou_list.append(iou)
-    iou_list = np.stack(iou_list)
-    iou_list = torch.from_numpy(iou_list).to(imgs.device)
-    iou_list = concat_all_gather(iou_list)
-    prec_list = []
-    for thres in torch.arange(0.5, 1.0, 0.1):
-        tmp = (iou_list > thres).float().mean()
-        prec_list.append(tmp)
-    iou = iou_list.mean()
-    prec = {}
-    temp = '  '
-    for i, thres in enumerate(range(5, 10)):
-        key = 'Pr@{}'.format(thres * 10)
-        value = prec_list[i].item()
-        prec[key] = value
-        temp += "{}: {:.2f}  ".format(key, 100. * value)
-    head = 'Evaluation: Epoch=[{}/{}]  IoU={:.2f}'.format(
-        epoch, args.epochs, 100. * iou.item())
-    logger.info(head + temp)
-    return iou.item(), prec
-
-
-@torch.no_grad()
 def inference(test_loader, model, args):
-    iou_list = []
+    def safe_div(num, den):
+        return float(num) / float(den) if den else 0.0
+
+    tp = 0
+    fp = 0
+    fn = 0
+    tn = 0
     tbar = tqdm(test_loader, desc='Inference:', ncols=100)
     model.eval()
     time.sleep(2)
-    for img, param in tbar:
+    for img, text, param in tbar:
         # data
         img = img.cuda(non_blocking=True)
-        mask = cv2.imread(param['mask_dir'][0], flags=cv2.IMREAD_GRAYSCALE)
+        text = text.cuda(non_blocking=True)
+        mask = cv2.imread(param['mask_path'][0], flags=cv2.IMREAD_GRAYSCALE)
+        if mask is None:
+            raise ValueError(f"Failed to read mask: {param['mask_path'][0]}")
+        mask = (mask > args.mask_foreground_threshold).astype(np.uint8)
         # dump image & mask
         if args.visualize:
-            seg_id = param['seg_id'][0].cpu().numpy()
-            img_name = '{}-img.jpg'.format(seg_id)
-            mask_name = '{}-mask.png'.format(seg_id)
-            cv2.imwrite(filename=os.path.join(args.vis_dir, img_name),
-                        img=param['ori_img'][0].cpu().numpy())
-            cv2.imwrite(filename=os.path.join(args.vis_dir, mask_name),
-                        img=mask)
-        # multiple sentences
-        for sent in param['sents']:
-            mask = mask / 255.
-            text = tokenize(sent, args.word_len, True)
-            text = text.cuda(non_blocking=True)
-            # inference
-            pred = model(img, text)
-            pred = torch.sigmoid(pred)
-            if pred.shape[-2:] != img.shape[-2:]:
-                pred = F.interpolate(pred,
-                                     size=img.shape[-2:],
-                                     mode='bicubic',
-                                     align_corners=True).squeeze()
-            # process one sentence
-            h, w = param['ori_size'].numpy()[0]
-            mat = param['inverse'].numpy()[0]
-            pred = pred.cpu().numpy()
-            pred = cv2.warpAffine(pred, mat, (w, h),
-                                  flags=cv2.INTER_CUBIC,
-                                  borderValue=0.)
-            pred = np.array(pred > 0.35)
-            # iou
-            inter = np.logical_and(pred, mask)
-            union = np.logical_or(pred, mask)
-            iou = np.sum(inter) / (np.sum(union) + 1e-6)
-            iou_list.append(iou)
-            # dump prediction
-            if args.visualize:
-                pred = np.array(pred*255, dtype=np.uint8)
-                sent = "_".join(sent[0].split(" "))
-                pred_name = '{}-iou={:.2f}-{}.png'.format(seg_id, iou*100, sent)
-                cv2.imwrite(filename=os.path.join(args.vis_dir, pred_name),
-                            img=pred)
-    logger.info('=> Metric Calculation <=')
-    iou_list = np.stack(iou_list)
-    iou_list = torch.from_numpy(iou_list).to(img.device)
-    prec_list = []
-    for thres in torch.arange(0.5, 1.0, 0.1):
-        tmp = (iou_list > thres).float().mean()
-        prec_list.append(tmp)
-    iou = iou_list.mean()
-    prec = {}
-    for i, thres in enumerate(range(5, 10)):
-        key = 'Pr@{}'.format(thres*10)
-        value = prec_list[i].item()
-        prec[key] = value
-    logger.info('IoU={:.2f}'.format(100.*iou.item()))
-    for k, v in prec.items():
-        logger.info('{}: {:.2f}.'.format(k, 100.*v))
+            item_id = param['item_id'][0]
+            image = cv2.imread(param['image_path'][0], flags=cv2.IMREAD_COLOR)
+            if image is not None:
+                cv2.imwrite(filename=os.path.join(args.vis_dir, f'{item_id}-img.jpg'),
+                            img=image)
+            cv2.imwrite(filename=os.path.join(args.vis_dir, f'{item_id}-mask.png'),
+                        img=np.array(mask * 255, dtype=np.uint8))
 
-    return iou.item(), prec
+        pred = model(img, text)
+        pred = torch.sigmoid(pred)
+        if pred.shape[-2:] != img.shape[-2:]:
+            pred = F.interpolate(pred,
+                                 size=img.shape[-2:],
+                                 mode='bicubic',
+                                 align_corners=True)
+        pred = pred.squeeze().cpu().numpy()
+
+        h, w = param['ori_size'].numpy()[0]
+        mat = param['inverse'].numpy()[0]
+        pred = cv2.warpAffine(pred, mat, (w, h),
+                              flags=cv2.INTER_CUBIC,
+                              borderValue=0.)
+        pred = np.array(pred > args.pred_threshold, dtype=np.uint8)
+
+        tp += int(np.logical_and(pred == 1, mask == 1).sum())
+        fp += int(np.logical_and(pred == 1, mask == 0).sum())
+        fn += int(np.logical_and(pred == 0, mask == 1).sum())
+        tn += int(np.logical_and(pred == 0, mask == 0).sum())
+
+        if args.visualize:
+            item_id = param['item_id'][0]
+            pred_name = f"{item_id}-pred.png"
+            cv2.imwrite(filename=os.path.join(args.vis_dir, pred_name),
+                        img=np.array(pred * 255, dtype=np.uint8))
+
+    iou = safe_div(tp, tp + fp + fn)
+    dice = safe_div(2 * tp, 2 * tp + fp + fn)
+    recall = safe_div(tp, tp + fn)
+    iou_bg = safe_div(tn, tn + fn + fp)
+    acc_fg = safe_div(tp, tp + fn)
+    acc_bg = safe_div(tn, tn + fp)
+    miou = (iou + iou_bg) / 2.0
+    macc = (acc_fg + acc_bg) / 2.0
+
+    metrics = {
+        "iou": iou,
+        "dice": dice,
+        "recall": recall,
+        "miou": miou,
+        "macc": macc,
+    }
+    for key, value in metrics.items():
+        logger.info('{}={:.4f}'.format(key, value))
+
+    return metrics

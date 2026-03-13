@@ -1,11 +1,10 @@
 wandb
 numpy
-lmdb
-pyarrow==11.0.0
 regex
 ftfy
 loguru
-pycocotools
 matplotlib
 tqdm
-opencv-python
+opencv-python-headless
+PyYAML
+Pillow

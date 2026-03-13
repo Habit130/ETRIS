@@ -43,6 +43,7 @@ def main():
     args.exp_name = '_'.join([args.exp_name] + [str(name) for name in [args.ladder_dim, args.nhead, args.dim_ffn, args.multi_stage]])
          
     args.output_dir = os.path.join(args.output_folder, args.exp_name)
+    os.makedirs(args.output_dir, exist_ok=True)
     if args.visualize:
         args.vis_dir = os.path.join(args.output_dir, "vis")
         os.makedirs(args.vis_dir, exist_ok=True)
@@ -52,16 +53,15 @@ def main():
                  distributed_rank=0,
                  filename="test.log",
                  mode="a")
-    logger.info(args)
 
     # build dataset & dataloader
-    test_data = RefDataset(lmdb_dir=args.test_lmdb,
-                           mask_dir=args.mask_root,
-                           dataset=args.dataset,
-                           split=args.test_split,
+    test_data = RefDataset(dataset_root=args.dataset_root,
+                           json_path=args.test_json,
                            mode='test',
                            input_size=args.input_size,
-                           word_length=args.word_len)
+                           word_length=args.word_len,
+                           caption_index=args.caption_index,
+                           mask_foreground_threshold=args.mask_foreground_threshold)
     test_loader = torch.utils.data.DataLoader(test_data,
                                               batch_size=1,
                                               shuffle=False,
@@ -69,16 +69,14 @@ def main():
                                               pin_memory=True)
 
     # build model
+    args.quiet = True
     model, _ = build_segmenter(args)
     model = torch.nn.DataParallel(model).cuda()
-    logger.info(model)
 
-    args.model_dir = os.path.join(args.output_dir, "best_model.pth")
+    args.model_dir = os.path.join(args.output_dir, "last_model.pth")
     if os.path.isfile(args.model_dir):
-        logger.info("=> loading checkpoint '{}'".format(args.model_dir))
         checkpoint = torch.load(args.model_dir)
         model.load_state_dict(checkpoint['state_dict'], strict=True)
-        logger.info("=> loaded checkpoint '{}'".format(args.model_dir))
     else:
         raise ValueError(
             "=> resume failed! no checkpoint found at '{}'. Please check args.resume again!"

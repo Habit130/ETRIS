@@ -1,4 +1,4 @@
-dataset_name="refcoco" # "refcoco", "refcoco+", "refcocog_g", "refcocog_u"
+dataset_name="custom"
 config_name="bridge_r101.yaml"
 gpu="0,1"
 export CUDA_VISIBLE_DEVICES=$gpu

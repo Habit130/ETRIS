@@ -1,42 +1,14 @@
-import os
+import json
+from pathlib import Path
 from typing import List, Union
 
 import cv2
-import lmdb
 import numpy as np
-import pyarrow as pa
 import torch
 from torch.utils.data import Dataset
 
 from .simple_tokenizer import SimpleTokenizer as _Tokenizer
 
-info = {
-    'refcoco': {
-        'train': 42404,
-        'val': 3811,
-        'val-test': 3811,
-        'testA': 1975,
-        'testB': 1810
-    },
-    'refcoco+': {
-        'train': 42278,
-        'val': 3805,
-        'val-test': 3805,
-        'testA': 1975,
-        'testB': 1798
-    },
-    'refcocog_u': {
-        'train': 42226,
-        'val': 2573,
-        'val-test': 2573,
-        'test': 5023
-    },
-    'refcocog_g': {
-        'train': 44822,
-        'val': 5000,
-        'val-test': 5000
-    }
-}
 _tokenizer = _Tokenizer()
 
 
@@ -44,22 +16,7 @@ def tokenize(texts: Union[str, List[str]],
              context_length: int = 77,
              truncate: bool = False) -> torch.LongTensor:
     """
-    Returns the tokenized representation of given input string(s)
-
-    Parameters
-    ----------
-    texts : Union[str, List[str]]
-        An input string or a list of input strings to tokenize
-
-    context_length : int
-        The context length to use; all CLIP models use 77 as the context length
-
-    truncate: bool
-        Whether to truncate the text in case its encoding is longer than the context length
-
-    Returns
-    -------
-    A two-dimensional tensor containing the resulting tokens, shape = [number of input strings, context_length]
+    Returns the tokenized representation of given input string(s).
     """
     if isinstance(texts, str):
         texts = [texts]
@@ -84,66 +41,98 @@ def tokenize(texts: Union[str, List[str]],
     return result
 
 
-def loads_pyarrow(buf):
-    """
-    Args:
-        buf: the output of `dumps`.
-    """
-    return pa.deserialize(buf)
-
-
 class RefDataset(Dataset):
-    def __init__(self, lmdb_dir, mask_dir, dataset, split, mode, input_size,
-                 word_length):
+    def __init__(self,
+                 dataset_root,
+                 json_path,
+                 mode,
+                 input_size,
+                 word_length,
+                 caption_index=2,
+                 mask_foreground_threshold=0):
         super(RefDataset, self).__init__()
-        self.lmdb_dir = lmdb_dir
-        self.mask_dir = mask_dir
-        self.dataset = dataset
-        self.split = split
+        self.dataset_root = Path(dataset_root).expanduser()
+        if not self.dataset_root.is_absolute():
+            self.dataset_root = (Path.cwd() / self.dataset_root).resolve()
+        self.json_path = self._resolve_path(json_path)
         self.mode = mode
         self.input_size = (input_size, input_size)
         self.word_length = word_length
+        self.caption_index = int(caption_index)
+        self.mask_foreground_threshold = float(mask_foreground_threshold)
         self.mean = torch.tensor([0.48145466, 0.4578275,
                                   0.40821073]).reshape(3, 1, 1)
         self.std = torch.tensor([0.26862954, 0.26130258,
                                  0.27577711]).reshape(3, 1, 1)
-        self.length = info[dataset][split]
-        self.env = None
+        self.samples = self._load_samples()
 
-    def _init_db(self):
-        self.env = lmdb.open(self.lmdb_dir,
-                             subdir=os.path.isdir(self.lmdb_dir),
-                             readonly=True,
-                             lock=False,
-                             readahead=False,
-                             meminit=False)
-        with self.env.begin(write=False) as txn:
-            self.length = loads_pyarrow(txn.get(b'__len__'))
-            self.keys = loads_pyarrow(txn.get(b'__keys__'))
+    def _resolve_path(self, path_like):
+        path = Path(path_like).expanduser()
+        if path.is_absolute():
+            return path
+        candidate = (self.dataset_root / path).resolve()
+        if candidate.exists():
+            return candidate
+        return (Path.cwd() / path).resolve()
+
+    def _load_samples(self):
+        if not self.dataset_root.exists():
+            raise FileNotFoundError(
+                f"Dataset root does not exist: {self.dataset_root}")
+        if not self.json_path.exists():
+            raise FileNotFoundError(f"Dataset json does not exist: {self.json_path}")
+
+        with self.json_path.open("r", encoding="utf-8") as f:
+            raw_samples = json.load(f)
+
+        if not isinstance(raw_samples, list):
+            raise ValueError(f"Dataset json must be a list: {self.json_path}")
+
+        samples = []
+        for idx, sample in enumerate(raw_samples):
+            item_id = sample.get("id", str(idx))
+            captions = sample.get("caption")
+            if not isinstance(captions, list) or len(captions) <= self.caption_index:
+                raise IndexError(
+                    f"Sample '{item_id}' does not contain caption[{self.caption_index}]"
+                )
+
+            image_path = self._resolve_path(sample.get("image", ""))
+            mask_path = self._resolve_path(sample.get("mask", ""))
+            if not image_path.exists():
+                raise FileNotFoundError(
+                    f"Image not found for sample '{item_id}': {image_path}")
+            if not mask_path.exists():
+                raise FileNotFoundError(
+                    f"Mask not found for sample '{item_id}': {mask_path}")
+
+            samples.append({
+                "id": item_id,
+                "image_path": image_path,
+                "mask_path": mask_path,
+                "caption": captions[self.caption_index],
+            })
+        return samples
 
     def __len__(self):
-        return self.length
+        return len(self.samples)
 
     def __getitem__(self, index):
-        # Delay loading LMDB data until after initialization: https://github.com/chainer/chainermn/issues/129
-        if self.env is None:
-            self._init_db()
-        env = self.env
-        with env.begin(write=False) as txn:
-            byteflow = txn.get(self.keys[index])
-        ref = loads_pyarrow(byteflow)
-        # img
-        ori_img = cv2.imdecode(np.frombuffer(ref['img'], np.uint8),
-                               cv2.IMREAD_COLOR)
+        sample = self.samples[index]
+        ori_img = cv2.imread(str(sample["image_path"]), cv2.IMREAD_COLOR)
+        if ori_img is None:
+            raise ValueError(f"Failed to read image: {sample['image_path']}")
         img = cv2.cvtColor(ori_img, cv2.COLOR_BGR2RGB)
         img_size = img.shape[:2]
-        # mask
-        seg_id = ref['seg_id']
-        mask_dir = os.path.join(self.mask_dir, str(seg_id) + '.png')
-        # sentences
-        idx = np.random.choice(ref['num_sents'])
-        sents = ref['sents']
-        # transform
+
+        mask = cv2.imread(str(sample["mask_path"]), cv2.IMREAD_GRAYSCALE)
+        if mask is None:
+            raise ValueError(f"Failed to read mask: {sample['mask_path']}")
+        mask = (mask > self.mask_foreground_threshold).astype(np.float32)
+
+        sent = sample["caption"]
+        word_vec = tokenize(sent, self.word_length, True).squeeze(0)
+
         mat, mat_inv = self.getTransformMat(img_size, True)
         img = cv2.warpAffine(
             img,
@@ -151,44 +140,27 @@ class RefDataset(Dataset):
             self.input_size,
             flags=cv2.INTER_CUBIC,
             borderValue=[0.48145466 * 255, 0.4578275 * 255, 0.40821073 * 255])
-        if self.mode == 'train':
-            # mask transform
-            mask = cv2.imdecode(np.frombuffer(ref['mask'], np.uint8),
-                                cv2.IMREAD_GRAYSCALE)
-            mask = cv2.warpAffine(mask,
-                                  mat,
-                                  self.input_size,
-                                  flags=cv2.INTER_LINEAR,
-                                  borderValue=0.)
-            mask = mask / 255.
-            # sentence -> vector
-            sent = sents[idx]
-            word_vec = tokenize(sent, self.word_length, True).squeeze(0)
+        mask = cv2.warpAffine(mask,
+                              mat,
+                              self.input_size,
+                              flags=cv2.INTER_NEAREST,
+                              borderValue=0.)
+        mask = (mask > 0.5).astype(np.float32)
+
+        if self.mode == "train":
             img, mask = self.convert(img, mask)
             return img, word_vec, mask
-        elif self.mode == 'val':
-            # sentence -> vector
-            sent = sents[0]
-            word_vec = tokenize(sent, self.word_length, True).squeeze(0)
-            img = self.convert(img)[0]
-            params = {
-                'mask_dir': mask_dir,
-                'inverse': mat_inv,
-                'ori_size': np.array(img_size)
-            }
-            return img, word_vec, params
-        else:
-            # sentence -> vector
-            img = self.convert(img)[0]
-            params = {
-                'ori_img': ori_img,
-                'seg_id': seg_id,
-                'mask_dir': mask_dir,
-                'inverse': mat_inv,
-                'ori_size': np.array(img_size),
-                'sents': sents
-            }
-            return img, params
+
+        img = self.convert(img)[0]
+        params = {
+            "item_id": sample["id"],
+            "image_path": str(sample["image_path"]),
+            "mask_path": str(sample["mask_path"]),
+            "caption": sent,
+            "inverse": mat_inv.astype(np.float32),
+            "ori_size": np.array(img_size, dtype=np.int32),
+        }
+        return img, word_vec, params
 
     def getTransformMat(self, img_size, inverse=False):
         ori_h, ori_w = img_size
@@ -208,12 +180,10 @@ class RefDataset(Dataset):
         return mat, None
 
     def convert(self, img, mask=None):
-        # Image ToTensor & Normalize
         img = torch.from_numpy(img.transpose((2, 0, 1)))
         if not isinstance(img, torch.FloatTensor):
             img = img.float()
         img.div_(255.).sub_(self.mean).div_(self.std)
-        # Mask ToTensor
         if mask is not None:
             mask = torch.from_numpy(mask)
             if not isinstance(mask, torch.FloatTensor):
@@ -222,15 +192,10 @@ class RefDataset(Dataset):
 
     def __repr__(self):
         return self.__class__.__name__ + "(" + \
-            f"db_path={self.lmdb_dir}, " + \
-            f"dataset={self.dataset}, " + \
-            f"split={self.split}, " + \
+            f"dataset_root={self.dataset_root}, " + \
+            f"json_path={self.json_path}, " + \
             f"mode={self.mode}, " + \
             f"input_size={self.input_size}, " + \
-            f"word_length={self.word_length}"
-
-    # def get_length(self):
-    #     return self.length
-
-    # def get_sample(self, idx):
-    #     return self.__getitem__(idx)
+            f"word_length={self.word_length}, " + \
+            f"caption_index={self.caption_index}, " + \
+            f"mask_foreground_threshold={self.mask_foreground_threshold})"
