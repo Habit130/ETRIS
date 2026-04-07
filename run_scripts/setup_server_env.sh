@@ -22,8 +22,6 @@ trap cleanup EXIT
 cat > "${TMP_CONDARC}" <<'EOF'
 channels:
   - conda-forge
-  - pytorch
-  - nvidia
 default_channels: []
 channel_priority: strict
 show_channel_urls: true
