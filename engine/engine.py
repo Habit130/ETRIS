@@ -14,6 +14,42 @@ from utils.misc import (AverageMeter, ProgressMeter, concat_all_gather,
                         trainMetricGPU)
 
 
+def _get_pred_threshold(args):
+    return getattr(args, 'pred_threshold', 0.35)
+
+
+def _accumulate_binary_stats(pred, mask):
+    pred = pred.astype(bool)
+    mask = mask.astype(bool)
+    tp = np.logical_and(pred, mask).sum(dtype=np.float64)
+    fp = np.logical_and(pred, np.logical_not(mask)).sum(dtype=np.float64)
+    fn = np.logical_and(np.logical_not(pred), mask).sum(dtype=np.float64)
+    tn = np.logical_and(np.logical_not(pred), np.logical_not(mask)).sum(
+        dtype=np.float64)
+    return tp, fp, fn, tn
+
+
+def _compute_binary_metrics(tp, fp, fn, tn):
+    eps = 1e-6
+    fg_iou = tp / (tp + fp + fn + eps)
+    dice = (2.0 * tp) / (2.0 * tp + fp + fn + eps)
+    recall = tp / (tp + fn + eps)
+    bg_iou = tn / (tn + fp + fn + eps)
+    bg_acc = tn / (tn + fp + eps)
+    return {
+        'IoU': fg_iou,
+        'Dice': dice,
+        'Recall': recall,
+        'mIoU': (fg_iou + bg_iou) / 2.0,
+        'mACC': (recall + bg_acc) / 2.0,
+    }
+
+
+def _format_metric_log(metrics):
+    return '  '.join(
+        f'{name}={100.0 * value:.2f}' for name, value in metrics.items())
+
+
 def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
     batch_time = AverageMeter('Batch', ':2.2f')
     data_time = AverageMeter('Data', ':2.2f')
@@ -82,13 +118,16 @@ def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
 
 @torch.no_grad()
 def validate(val_loader, model, epoch, args):
-    iou_list = []
+    stats = None
+    threshold = _get_pred_threshold(args)
     model.eval()
     time.sleep(2)
     for imgs, texts, param in val_loader:
         # data
         imgs = imgs.cuda(non_blocking=True)
         texts = texts.cuda(non_blocking=True)
+        if stats is None:
+            stats = torch.zeros(4, dtype=torch.float64, device=imgs.device)
         # inference
         preds = model(imgs, texts)
         preds = torch.sigmoid(preds)
@@ -107,38 +146,30 @@ def validate(val_loader, model, epoch, args):
             pred = cv2.warpAffine(pred, mat, (w, h),
                                   flags=cv2.INTER_CUBIC,
                                   borderValue=0.)
-            pred = np.array(pred > 0.35)
+            pred = np.array(pred > threshold)
             mask = cv2.imread(mask_dir, flags=cv2.IMREAD_GRAYSCALE)
             mask = mask / 255.
-            # iou
-            inter = np.logical_and(pred, mask)
-            union = np.logical_or(pred, mask)
-            iou = np.sum(inter) / (np.sum(union) + 1e-6)
-            iou_list.append(iou)
-    iou_list = np.stack(iou_list)
-    iou_list = torch.from_numpy(iou_list).to(imgs.device)
-    iou_list = concat_all_gather(iou_list)
-    prec_list = []
-    for thres in torch.arange(0.5, 1.0, 0.1):
-        tmp = (iou_list > thres).float().mean()
-        prec_list.append(tmp)
-    iou = iou_list.mean()
-    prec = {}
-    temp = '  '
-    for i, thres in enumerate(range(5, 10)):
-        key = 'Pr@{}'.format(thres * 10)
-        value = prec_list[i].item()
-        prec[key] = value
-        temp += "{}: {:.2f}  ".format(key, 100. * value)
-    head = 'Evaluation: Epoch=[{}/{}]  IoU={:.2f}'.format(
-        epoch, args.epochs, 100. * iou.item())
-    logger.info(head + temp)
-    return iou.item(), prec
+            stats += torch.tensor(_accumulate_binary_stats(pred, mask),
+                                  dtype=torch.float64,
+                                  device=imgs.device)
+    if stats is None:
+        stats = torch.zeros(4,
+                            dtype=torch.float64,
+                            device=next(model.parameters()).device)
+    dist.all_reduce(stats, op=dist.ReduceOp.SUM)
+    metrics = _compute_binary_metrics(*stats.tolist())
+    logger.info('Evaluation: Epoch=[{}/{}]  {}'.format(
+        epoch, args.epochs, _format_metric_log(metrics)))
+    return metrics['IoU'], metrics
 
 
 @torch.no_grad()
 def inference(test_loader, model, args):
-    iou_list = []
+    threshold = _get_pred_threshold(args)
+    total_tp = 0.0
+    total_fp = 0.0
+    total_fn = 0.0
+    total_tn = 0.0
     tbar = tqdm(test_loader, desc='Inference:', ncols=100)
     model.eval()
     time.sleep(2)
@@ -148,7 +179,9 @@ def inference(test_loader, model, args):
         mask = cv2.imread(param['mask_dir'][0], flags=cv2.IMREAD_GRAYSCALE)
         # dump image & mask
         if args.visualize:
-            seg_id = param['seg_id'][0].cpu().numpy()
+            seg_id = param['seg_id'][0]
+            if torch.is_tensor(seg_id):
+                seg_id = seg_id.item()
             img_name = '{}-img.jpg'.format(seg_id)
             mask_name = '{}-mask.png'.format(seg_id)
             cv2.imwrite(filename=os.path.join(args.vis_dir, img_name),
@@ -175,12 +208,13 @@ def inference(test_loader, model, args):
             pred = cv2.warpAffine(pred, mat, (w, h),
                                   flags=cv2.INTER_CUBIC,
                                   borderValue=0.)
-            pred = np.array(pred > 0.35)
-            # iou
-            inter = np.logical_and(pred, mask)
-            union = np.logical_or(pred, mask)
-            iou = np.sum(inter) / (np.sum(union) + 1e-6)
-            iou_list.append(iou)
+            pred = np.array(pred > threshold)
+            tp, fp, fn, tn = _accumulate_binary_stats(pred, mask)
+            total_tp += tp
+            total_fp += fp
+            total_fn += fn
+            total_tn += tn
+            iou = tp / (tp + fp + fn + 1e-6)
             # dump prediction
             if args.visualize:
                 pred = np.array(pred*255, dtype=np.uint8)
@@ -189,20 +223,6 @@ def inference(test_loader, model, args):
                 cv2.imwrite(filename=os.path.join(args.vis_dir, pred_name),
                             img=pred)
     logger.info('=> Metric Calculation <=')
-    iou_list = np.stack(iou_list)
-    iou_list = torch.from_numpy(iou_list).to(img.device)
-    prec_list = []
-    for thres in torch.arange(0.5, 1.0, 0.1):
-        tmp = (iou_list > thres).float().mean()
-        prec_list.append(tmp)
-    iou = iou_list.mean()
-    prec = {}
-    for i, thres in enumerate(range(5, 10)):
-        key = 'Pr@{}'.format(thres*10)
-        value = prec_list[i].item()
-        prec[key] = value
-    logger.info('IoU={:.2f}'.format(100.*iou.item()))
-    for k, v in prec.items():
-        logger.info('{}: {:.2f}.'.format(k, 100.*v))
-
-    return iou.item(), prec
+    metrics = _compute_binary_metrics(total_tp, total_fp, total_fn, total_tn)
+    logger.info(_format_metric_log(metrics))
+    return metrics['IoU'], metrics

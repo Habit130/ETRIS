@@ -67,6 +67,7 @@ def main_worker(args):
     args.exp_name = '_'.join([args.exp_name] + [str(name) for name in [args.ladder_dim, args.nhead, args.dim_ffn, args.multi_stage]])
     
     args.output_dir = os.path.join(args.output_folder, args.exp_name)
+    os.makedirs(args.output_dir, exist_ok=True)
     dist.init_process_group(backend="nccl")
     local_rank = int(os.environ["LOCAL_RANK"])
     # local rank & global rank

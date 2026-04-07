@@ -43,6 +43,7 @@ def main():
     args.exp_name = '_'.join([args.exp_name] + [str(name) for name in [args.ladder_dim, args.nhead, args.dim_ffn, args.multi_stage]])
          
     args.output_dir = os.path.join(args.output_folder, args.exp_name)
+    os.makedirs(args.output_dir, exist_ok=True)
     if args.visualize:
         args.vis_dir = os.path.join(args.output_dir, "vis")
         os.makedirs(args.vis_dir, exist_ok=True)

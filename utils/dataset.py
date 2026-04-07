@@ -107,8 +107,28 @@ class RefDataset(Dataset):
                                   0.40821073]).reshape(3, 1, 1)
         self.std = torch.tensor([0.26862954, 0.26130258,
                                  0.27577711]).reshape(3, 1, 1)
-        self.length = info[dataset][split]
+        self.length = self._resolve_length(dataset, split)
         self.env = None
+
+    def _resolve_length(self, dataset, split):
+        dataset_info = info.get(dataset, {})
+        if split in dataset_info:
+            return dataset_info[split]
+        if os.path.exists(self.lmdb_dir):
+            env = lmdb.open(self.lmdb_dir,
+                            subdir=os.path.isdir(self.lmdb_dir),
+                            readonly=True,
+                            lock=False,
+                            readahead=False,
+                            meminit=False)
+            with env.begin(write=False) as txn:
+                length = loads_pyarrow(txn.get(b'__len__'))
+            env.close()
+            return length
+        raise KeyError(
+            f"Unknown dataset/split pair: {dataset}/{split}. "
+            "Build the LMDB first or register the split length in utils.dataset.info."
+        )
 
     def _init_db(self):
         self.env = lmdb.open(self.lmdb_dir,
