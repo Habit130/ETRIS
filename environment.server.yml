@@ -23,4 +23,4 @@ dependencies:
       - loguru
       - pycocotools
       - matplotlib
-      - opencv-python
+      - opencv-python-headless

@@ -34,6 +34,8 @@ else
 fi
 
 conda activate "${ENV_NAME}"
+python -m pip uninstall -y opencv-python opencv-contrib-python >/dev/null 2>&1 || true
+python -m pip install --no-deps opencv-python-headless >/dev/null
 mkdir -p "${ROOT_DIR}/pretrain"
 
 python "${ROOT_DIR}/tools/download_hf_asset.py" \
