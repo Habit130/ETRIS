@@ -35,7 +35,8 @@ fi
 
 conda activate "${ENV_NAME}"
 python -m pip uninstall -y opencv-python opencv-contrib-python >/dev/null 2>&1 || true
-python -m pip install --no-deps opencv-python-headless >/dev/null
+python -m pip install --no-deps --upgrade "opencv-python-headless==4.10.0.84"
+python -m pip show opencv-python-headless
 mkdir -p "${ROOT_DIR}/pretrain"
 
 python "${ROOT_DIR}/tools/download_hf_asset.py" \
@@ -43,4 +44,32 @@ python "${ROOT_DIR}/tools/download_hf_asset.py" \
   --output "${ROOT_DIR}/pretrain/ViT-B-16.pt" \
   --sha256 "${HF_VIT_SHA256}"
 
-python -c "import cv2, ftfy, lmdb, pyarrow, regex, torch, wandb, yaml; from PIL import Image; import pycocotools.mask; print('environment-ok', torch.__version__)"
+python - <<'PY'
+import importlib
+import traceback
+
+modules = [
+    ("cv2", "cv2"),
+    ("ftfy", "ftfy"),
+    ("lmdb", "lmdb"),
+    ("pyarrow", "pyarrow"),
+    ("regex", "regex"),
+    ("torch", "torch"),
+    ("wandb", "wandb"),
+    ("yaml", "yaml"),
+    ("PIL.Image", "PIL.Image"),
+    ("pycocotools.mask", "pycocotools.mask"),
+]
+
+loaded = {}
+for label, module_name in modules:
+    try:
+        loaded[label] = importlib.import_module(module_name)
+        print(f"import-ok: {label}")
+    except Exception:
+        print(f"import-failed: {label}")
+        traceback.print_exc()
+        raise
+
+print("environment-ok", loaded["torch"].__version__)
+PY
