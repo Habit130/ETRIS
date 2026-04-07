@@ -1,25 +1,24 @@
 name: etris-plantseg
 channels:
+  - conda-forge
   - pytorch
   - nvidia
-  - conda-forge
+  - nodefaults
 dependencies:
   - python=3.10
   - pytorch=2.1.2
   - torchvision=0.16.2
   - pytorch-cuda=11.8
-  - numpy
+  - numpy<2
   - pyyaml
   - pillow
   - tqdm
-  - pip
-  - pip:
-      - wandb
-      - lmdb
-      - pyarrow==11.0.0
-      - regex
-      - ftfy
-      - loguru
-      - pycocotools
-      - matplotlib
-      - opencv-python
+  - wandb
+  - lmdb
+  - pyarrow=11
+  - regex
+  - ftfy
+  - loguru
+  - pycocotools
+  - matplotlib
+  - opencv
