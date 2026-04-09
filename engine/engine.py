@@ -50,6 +50,31 @@ def _format_metric_log(metrics):
         f'{name}={100.0 * value:.2f}' for name, value in metrics.items())
 
 
+def _mask_to_gray(mask):
+    if mask.ndim == 2:
+        return mask
+    if mask.ndim == 3 and mask.shape[2] == 3:
+        return cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
+    if mask.ndim == 3 and mask.shape[2] == 4:
+        return cv2.cvtColor(mask, cv2.COLOR_BGRA2GRAY)
+    raise ValueError(f'Unsupported mask shape: {mask.shape}')
+
+
+def _match_mask_layout(pred_mask, ref_mask):
+    pred_mask = pred_mask.astype(ref_mask.dtype, copy=False)
+    if ref_mask.ndim == 2:
+        return pred_mask
+    return np.repeat(pred_mask[:, :, None], ref_mask.shape[2], axis=2)
+
+
+def _save_pred_mask(args, seg_id, sent_idx, pred_mask, ref_mask):
+    if not getattr(args, 'save_pred_masks', False):
+        return
+    filename = f'{seg_id}.png' if sent_idx == 0 else f'{seg_id}-{sent_idx:02d}.png'
+    output = _match_mask_layout(pred_mask, ref_mask)
+    cv2.imwrite(os.path.join(args.pred_mask_dir, filename), output)
+
+
 def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
     batch_time = AverageMeter('Batch', ':2.2f')
     data_time = AverageMeter('Data', ':2.2f')
@@ -176,7 +201,9 @@ def inference(test_loader, model, args):
     for img, param in tbar:
         # data
         img = img.cuda(non_blocking=True)
-        mask = cv2.imread(param['mask_dir'][0], flags=cv2.IMREAD_GRAYSCALE)
+        ref_mask = cv2.imread(param['mask_dir'][0], flags=cv2.IMREAD_UNCHANGED)
+        mask_gray = _mask_to_gray(ref_mask)
+        mask_binary = mask_gray / 255.0
         # dump image & mask
         if args.visualize:
             seg_id = param['seg_id'][0]
@@ -187,10 +214,13 @@ def inference(test_loader, model, args):
             cv2.imwrite(filename=os.path.join(args.vis_dir, img_name),
                         img=param['ori_img'][0].cpu().numpy())
             cv2.imwrite(filename=os.path.join(args.vis_dir, mask_name),
-                        img=mask)
+                        img=mask_gray)
+        else:
+            seg_id = param['seg_id'][0]
+            if torch.is_tensor(seg_id):
+                seg_id = seg_id.item()
         # multiple sentences
-        for sent in param['sents']:
-            mask = mask / 255.
+        for sent_idx, sent in enumerate(param['sents']):
             text = tokenize(sent, args.word_len, True)
             text = text.cuda(non_blocking=True)
             # inference
@@ -209,19 +239,20 @@ def inference(test_loader, model, args):
                                   flags=cv2.INTER_CUBIC,
                                   borderValue=0.)
             pred = np.array(pred > threshold)
-            tp, fp, fn, tn = _accumulate_binary_stats(pred, mask)
+            tp, fp, fn, tn = _accumulate_binary_stats(pred, mask_binary)
             total_tp += tp
             total_fp += fp
             total_fn += fn
             total_tn += tn
             iou = tp / (tp + fp + fn + 1e-6)
+            pred_mask = np.array(pred * 255, dtype=np.uint8)
+            _save_pred_mask(args, seg_id, sent_idx, pred_mask, ref_mask)
             # dump prediction
             if args.visualize:
-                pred = np.array(pred*255, dtype=np.uint8)
                 sent = "_".join(sent[0].split(" "))
                 pred_name = '{}-iou={:.2f}-{}.png'.format(seg_id, iou*100, sent)
                 cv2.imwrite(filename=os.path.join(args.vis_dir, pred_name),
-                            img=pred)
+                            img=pred_mask)
     logger.info('=> Metric Calculation <=')
     metrics = _compute_binary_metrics(total_tp, total_fp, total_fn, total_tn)
     logger.info(_format_metric_log(metrics))

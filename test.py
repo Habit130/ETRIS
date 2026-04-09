@@ -47,6 +47,10 @@ def main():
     if args.visualize:
         args.vis_dir = os.path.join(args.output_dir, "vis")
         os.makedirs(args.vis_dir, exist_ok=True)
+    if getattr(args, 'save_pred_masks', False):
+        pred_dirname = getattr(args, 'pred_mask_dirname', 'pred_masks')
+        args.pred_mask_dir = os.path.join(args.output_dir, pred_dirname)
+        os.makedirs(args.pred_mask_dir, exist_ok=True)
 
     # logger
     setup_logger(args.output_dir,

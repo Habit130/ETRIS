@@ -58,3 +58,5 @@ TEST:
   test_split: test
   test_lmdb: ../plantseg/lmdb/test.lmdb
   visualize: False
+  save_pred_masks: True
+  pred_mask_dirname: pred_masks
