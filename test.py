@@ -25,6 +25,10 @@ def get_parser():
                         default='path to xxx.yaml',
                         type=str,
                         help='config file')
+    parser.add_argument('--save_pred_dir',
+                        default=None,
+                        type=str,
+                        help='directory for saving predicted binary masks')
     parser.add_argument('--opts',
                         default=None,
                         nargs=argparse.REMAINDER,
@@ -47,10 +51,9 @@ def main():
     if args.visualize:
         args.vis_dir = os.path.join(args.output_dir, "vis")
         os.makedirs(args.vis_dir, exist_ok=True)
-    if getattr(args, 'save_pred_masks', False):
-        pred_dirname = getattr(args, 'pred_mask_dirname', 'pred_masks')
-        args.pred_mask_dir = os.path.join(args.output_dir, pred_dirname)
-        os.makedirs(args.pred_mask_dir, exist_ok=True)
+    if args.save_pred_dir:
+        args.save_pred_dir = os.path.abspath(args.save_pred_dir)
+        os.makedirs(args.save_pred_dir, exist_ok=True)
 
     # logger
     setup_logger(args.output_dir,

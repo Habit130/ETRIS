@@ -50,29 +50,17 @@ def _format_metric_log(metrics):
         f'{name}={100.0 * value:.2f}' for name, value in metrics.items())
 
 
-def _mask_to_gray(mask):
-    if mask.ndim == 2:
-        return mask
-    if mask.ndim == 3 and mask.shape[2] == 3:
-        return cv2.cvtColor(mask, cv2.COLOR_BGR2GRAY)
-    if mask.ndim == 3 and mask.shape[2] == 4:
-        return cv2.cvtColor(mask, cv2.COLOR_BGRA2GRAY)
-    raise ValueError(f'Unsupported mask shape: {mask.shape}')
-
-
-def _match_mask_layout(pred_mask, ref_mask):
-    pred_mask = pred_mask.astype(ref_mask.dtype, copy=False)
-    if ref_mask.ndim == 2:
-        return pred_mask
-    return np.repeat(pred_mask[:, :, None], ref_mask.shape[2], axis=2)
-
-
-def _save_pred_mask(args, seg_id, sent_idx, pred_mask, ref_mask):
-    if not getattr(args, 'save_pred_masks', False):
+def _save_pred_mask(args, mask_path, pred_mask, sent_idx=0):
+    save_root = getattr(args, 'save_pred_dir', None)
+    if not save_root:
         return
-    filename = f'{seg_id}.png' if sent_idx == 0 else f'{seg_id}-{sent_idx:02d}.png'
-    output = _match_mask_layout(pred_mask, ref_mask)
-    cv2.imwrite(os.path.join(args.pred_mask_dir, filename), output)
+    relative_path = os.path.relpath(mask_path, args.mask_root)
+    save_path = os.path.join(save_root, relative_path)
+    if sent_idx > 0:
+        stem, ext = os.path.splitext(save_path)
+        save_path = '{}-{:02d}{}'.format(stem, sent_idx, ext)
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    cv2.imwrite(save_path, pred_mask)
 
 
 def train(train_loader, model, optimizer, scheduler, scaler, epoch, args):
@@ -191,34 +179,27 @@ def validate(val_loader, model, epoch, args):
 @torch.no_grad()
 def inference(test_loader, model, args):
     threshold = _get_pred_threshold(args)
-    total_tp = 0.0
-    total_fp = 0.0
-    total_fn = 0.0
-    total_tn = 0.0
     tbar = tqdm(test_loader, desc='Inference:', ncols=100)
     model.eval()
     time.sleep(2)
     for img, param in tbar:
         # data
         img = img.cuda(non_blocking=True)
-        ref_mask = cv2.imread(param['mask_dir'][0], flags=cv2.IMREAD_UNCHANGED)
-        mask_gray = _mask_to_gray(ref_mask)
-        mask_binary = mask_gray / 255.0
+        mask_path = param['mask_dir'][0]
+        mask_gray = cv2.imread(mask_path, flags=cv2.IMREAD_GRAYSCALE)
+        if mask_gray is None:
+            raise FileNotFoundError('Failed to read GT mask: {}'.format(mask_path))
         # dump image & mask
+        seg_id = param['seg_id'][0]
+        if torch.is_tensor(seg_id):
+            seg_id = seg_id.item()
         if args.visualize:
-            seg_id = param['seg_id'][0]
-            if torch.is_tensor(seg_id):
-                seg_id = seg_id.item()
             img_name = '{}-img.jpg'.format(seg_id)
             mask_name = '{}-mask.png'.format(seg_id)
             cv2.imwrite(filename=os.path.join(args.vis_dir, img_name),
                         img=param['ori_img'][0].cpu().numpy())
             cv2.imwrite(filename=os.path.join(args.vis_dir, mask_name),
                         img=mask_gray)
-        else:
-            seg_id = param['seg_id'][0]
-            if torch.is_tensor(seg_id):
-                seg_id = seg_id.item()
         # multiple sentences
         for sent_idx, sent in enumerate(param['sents']):
             text = tokenize(sent, args.word_len, True)
@@ -239,21 +220,12 @@ def inference(test_loader, model, args):
                                   flags=cv2.INTER_CUBIC,
                                   borderValue=0.)
             pred = np.array(pred > threshold)
-            tp, fp, fn, tn = _accumulate_binary_stats(pred, mask_binary)
-            total_tp += tp
-            total_fp += fp
-            total_fn += fn
-            total_tn += tn
-            iou = tp / (tp + fp + fn + 1e-6)
             pred_mask = np.array(pred * 255, dtype=np.uint8)
-            _save_pred_mask(args, seg_id, sent_idx, pred_mask, ref_mask)
+            _save_pred_mask(args, mask_path, pred_mask, sent_idx)
             # dump prediction
             if args.visualize:
                 sent = "_".join(sent[0].split(" "))
-                pred_name = '{}-iou={:.2f}-{}.png'.format(seg_id, iou*100, sent)
+                pred_name = '{}-{}.png'.format(seg_id, sent)
                 cv2.imwrite(filename=os.path.join(args.vis_dir, pred_name),
                             img=pred_mask)
-    logger.info('=> Metric Calculation <=')
-    metrics = _compute_binary_metrics(total_tp, total_fp, total_fn, total_tn)
-    logger.info(_format_metric_log(metrics))
-    return metrics['IoU'], metrics
+    logger.info('=> Prediction mask generation finished <=')
