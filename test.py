@@ -33,11 +33,12 @@ def get_parser():
                         default=None,
                         nargs=argparse.REMAINDER,
                         help='override some settings in the config.')
-    args = parser.parse_args()
-    assert args.config is not None
-    cfg = config.load_cfg_from_cfg_file(args.config)
-    if args.opts is not None:
-        cfg = config.merge_cfg_from_list(cfg, args.opts)
+    cli_args = parser.parse_args()
+    assert cli_args.config is not None
+    cfg = config.load_cfg_from_cfg_file(cli_args.config)
+    if cli_args.opts is not None:
+        cfg = config.merge_cfg_from_list(cfg, cli_args.opts)
+    cfg.save_pred_dir = cli_args.save_pred_dir
     return cfg
 
 
